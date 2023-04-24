@@ -1,6 +1,7 @@
 ---
 layout: post
 title: "피드백을 편하게 받아들이는 방법"
+slug: feedback easly
 category: feedback
 ---
 
