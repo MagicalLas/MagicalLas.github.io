@@ -3,12 +3,12 @@ author: Las aka Wonho
 email: las@magical.dev
 url: https://blog.magical.dev
 baseurl: ""
-description: > 
+description: >
   Somethin' Magical
 
 permalink: /:slug.html
 
-favicon: "logo.png" 
+favicon: "logo.png"
 remote_theme: riggraz/no-style-please
 
 theme_config:
@@ -16,6 +16,8 @@ theme_config:
   back_home_text: ".." # customize text for homepage link in post layout
   date_format: "%Y-%m-%d" # customize how date is formatted
   show_description: false # show blog description in home page
+
+highlighter: rouge
 
 sass:
   style: :compressed
