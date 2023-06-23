@@ -6,7 +6,7 @@ baseurl: ""
 description: >
   Somethin' Magical
 
-permalink: /:slug.html
+permalink: /:slug
 
 favicon: "logo.png"
 remote_theme: riggraz/no-style-please
