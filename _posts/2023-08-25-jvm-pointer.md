@@ -57,19 +57,23 @@ GC의 종류에 대해 살펴보면, 보통 tracing gc와 reference count gc로 
 
 Java의 경우도 이는 마찬가지인데, [Garbage Collection and Local Variable Type-Precision and Liveness in JavaTM Virtual Machines](https://dl.acm.org/doi/pdf/10.1145/277650.277738)에서도 다음과 같은 언급이 등장한다.
 
+```md
 > The relatively simple and highly constrained model of references presented by the JVM avoids the optimization-induced problems these other works address, such as interior and derived pointers.
 >
 > JVM이 제공하는 비교적 단순하고 제약이 많은 참조 모델은 내부 및 파생 포인터와 같은 다른 연구들에서 다루는 최적화 관련 문제를 피할 수 있습니다.
+```
 
 이러한 점들을 비교해보았을 때 GC 구현을 쉽게하는데 있어서 자바와 같이 pointer 연산에 제약을 주는 것은 매우 효과적이라고 할 수 있다.
 
 GC와 포인터가 함께 존재하는 언어인 Go를 살펴보는 것도 좋다. Go는 포인터가 명시적으로 존재하며 *int와 같은 타입을 실제로 많이 사용하는 언어이다. Java와 같이 pointer에 대하여 연산을 거의 지원하지 않는다. 따라서 대부분의 경우에는 Java와 비슷하게 tracing하는게 크게 문제가 없겠지만, 특수한 예외로 uintptr이라는 타입을 제공한다. 이는 C의 포인터와 유사한데, uintptr은 단순한 integer로 인식되며 GC는 uintptr가 가르키는 포인터를 할당해제할 수도 있다.
 
+```md
 > A uintptr is an integer, not a reference. Converting a Pointer to a uintptr creates an integer value with no pointer semantics. Even if a uintptr holds the address of some object, the garbage collector will not update that uintptr's value if the object moves, nor will that uintptr keep the object from being reclaimed.
 >
 > uintptr은 참조가 아닌 정수입니다. 포인터를 uintptr로 변환하면 포인터 시맨틱이 없는 정수 값이 생성됩니다. 가비지 컬렉터가 어떤 객체의 주소를 보유하고 있더라도 객체가 이동하면 가비지 컬렉터는 해당 객체의 값을 업데이트하지 않으며, 해당 객체가 회수되지 않도록 유지하지도 않습니다.
 >
 > ref: https://pkg.go.dev/unsafe#Pointer
+```
 
 여기서 핵심적인 포인트는 포인터를 직접적으로 노출하는 것이 아니라, 파생 포인터의 존재 없이 객체의 참조 가능성을 명확하게 만드는 것이 GC 구현에 중요하다는 것이다.
 
