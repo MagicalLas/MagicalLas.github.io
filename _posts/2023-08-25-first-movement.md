@@ -2,7 +2,7 @@
 layout: post
 title: "경력으로 첫 구직후기"
 slug: first-movement
-category: job
+category: essay
 ---
 
 이번에 3년 9개월을 다닌 버즈빌을 퇴사하고나서 진행한 구직 회고입니다.
