@@ -1,7 +1,7 @@
 ---
 layout: post
 title: "라스가 싼 똥 치우고 가라"
-slug: buzzvil-legacy
+slug: buzzvil-legacy-2
 category: essay
 ---
 
