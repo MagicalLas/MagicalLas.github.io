@@ -37,4 +37,4 @@ category: essay
 
 내가 욕을 먹는 것으로 그녀까지 욕을 먹지는 않았으면 한다.
 
-![black-cute-magical-girl](../_screenshots/black-cute-magical-girl-1.png)
+![black-cute-magical-girl](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/black-cute-magical-girl-1.png?raw=true)
