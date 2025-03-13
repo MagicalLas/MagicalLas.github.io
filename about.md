@@ -31,7 +31,7 @@ Server Developer in SRE Team.
 - 가장 피크 트래픽이 높은 서비스 운영 / 최적화
 - push system 구현
 
-#### 이슈 해결
+#### 이슈 해결 & 장애 대응
 - 토스의 다양한 서비스 이슈 분석 및 수정
 - webflux 리소스 사용량 분석
 - waiting lock 버그 수정
@@ -41,6 +41,10 @@ Server Developer in SRE Team.
 - heapdump, async-profiler 분석
 - 비효율적인 coroutine 사용 방식 수정
 
+#### 모니터링 & 이상 징후 탐지
+- 서비스 장애 상황 QA 환경 구축
+- 모니터링 대시보드 관리
+- 서비스 모니터링 유틸 구현
 
 ### Buzvil (2019.09.02~2023.06.02, 44개월)
 
