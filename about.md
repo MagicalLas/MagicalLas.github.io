@@ -39,6 +39,7 @@ Server Developer in SRE Team.
 - memory usage가 많은 상황의 cache migrator 구현
 - humongous allocation 발생하지 않도록 수정
 - heapdump, async-profiler 분석
+- 비효율적인 coroutine 사용 방식 수정
 
 
 ### Buzvil (2019.09.02~2023.06.02, 44개월)
