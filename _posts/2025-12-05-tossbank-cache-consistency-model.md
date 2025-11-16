@@ -160,7 +160,7 @@ Read에서 채우지않고, Write시에만 채우게하면 문제가 없을까�
 
 Write에만 Lock을 잡는 것은 Monotonic Read를 만족할 수는 없지만, 중요한 속성은 아닐 수 있습니다.
 
-## 대안 2 - lamport timestamp
+## 대안 2 - logical clocks
 
 CAS처럼 redis에서 version을 확인해서 이전 버전에 대한 SET (NX)를 무시하는 것입니다. 이것도 Monotonic Read는 만족하지 못하지만, "Read Your Writes"를 만족하게 됩니다.
 
