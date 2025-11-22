@@ -274,7 +274,75 @@ Write에만 Lock을 잡는 것은 Monotonic Read를 만족할 수는 없지만, 
 
 Lock만 우리를 구원해줄까요? 다른 방법은 없을까요? 우리에게는 다른 방법도 존재합니다. 바로 Versioned Conditional Set(혹은 Last-Write-Wins with Version, LWW-V)라고 불리는 방법이죠. 조금 더 약한 보장만 필요한 경우에 자주 사용되는 방법이죠. DB <-> Redis의 순서를 완전히 동일하게 맞추는 것이 아닌 **각 컴포넌트의 시간의 흐름이 거꾸로 가는 것을 막는** 방법입니다. 각 값에 version을 부여하고, Redis는 오직 더 높은 version의 값만 받아들입니다. 이는 MVCC(Multi-Version Concurrency Control)의 단순화된 형태로도 볼 수 있습니다.
 
-보통의 경우 redis에서 lua/functions를 이용하여 값의 version을 확인해서 이전 버전에 대한 SET (NX)를 무시하는 것입니다. 이것도 Monotonic Read는 만족하지 못하지만, "Read Your Writes"를 만족하게 됩니다.
+보통의 경우 redis에서 아래와 같은 lua/functions를 이용하여 값의 version을 확인해서 이전 버전에 대한 SET (NX)를 무시하는 것입니다.
+
+```lua
+-- KEYS[1] = dataKey
+-- KEYS[2] = versionKey
+-- ARGV[1] = newVersion (number)
+-- ARGV[2] = newData (string)
+
+local dataKey = KEYS[1]
+local verKey = KEYS[2]
+
+local newVersion = tonumber(ARGV[1])
+local newData = ARGV[2]
+
+-- 현재 버전 가져오기 (없으면 0 버전으로 처리)
+local curVersionStr = redis.call("GET", verKey)
+local curVersion = 0
+if curVersionStr then
+    curVersion = tonumber(curVersionStr)
+end
+
+-- version 비교
+if newVersion > curVersion then
+    -- set version
+    redis.call("SET", verKey, newVersion)
+    -- set data
+    redis.call("SET", dataKey, newData)
+    return 1
+else
+    return 0
+end
+```
+
+우리의 첫 모델에서 Read시에 캐시를 채우는 방식만 바꿔도보록 합시다. 의사코드는 아래와 같습니다.
+
+```go
+func read(userID string) string {
+    result := redis.get(userID)
+    if result != nil {
+        return result
+    }
+
+    dbResult := db.findByID(userID)
+    redis.VCS(userID, dbResult)
+
+    return dbResult
+}
+```
+
+이 경우에도 예외 시나리오가 발생합니다. 읽기와 쓰기가 동시에 처리되는 경우 redis에 데이터가 없어서 채우는 순서가 read를 나중에 처리한다면 unlink가 무시되는 일이 발생합니다.
+
+![반례 시나리오 10](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/10-violence.svg?raw=true)
+
+### Write시에 Cache를 채우면서 VSC를 써야한다
+
+그럼 Write시에 VCS를 사용해서 캐시를 채우면 어떨까요?
+
+```go
+func write(userID, newValue string) string {
+    db.openTransaction()
+    db.update(userID, newValue)
+    db.commit()
+
+    redis.VCS(userID, newValue)
+    return newValue
+}
+```
+
+**Write시점에 VCS를 사용하면 일관성이 깨지지 않고 항상 보장하게 됩니다..**
 
 VCS가 RYW를 만족시키는 이유는 Redis의 버전이 단조 증가하기 때문입니다. 
 Write 시점에 Redis의 logical clock을 해당 버전까지 끌어올리고, VCS는 이 clock이 후퇴하지 않음을 보장합니다.
