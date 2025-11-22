@@ -12,7 +12,7 @@ category: essay
 한편으로는 분산 시스템에서의 strong consistency를 적용하는 방식이 꽤나 특이하다는 느낌도 받았습니다. 
 읽다보니 점점 엄밀한 잣대로 글을 읽게 되더군요. 제 안의 분산시스템 악마가 깨어나고 있었습니다.
 이렇게 간단히 성능 저하 없이 문제를 잘 해결하는게 불가능하다는 생각이 들면서 몇가지 반례를 찾아내었습니다.
-블로그 길이의 한계로인해 모든걸 설명하지 못한것을 비판하난건 단순히 트집잡기에 불과하여 글을 약 반년간 방치했는데요.
+블로그 길이의 제약으로 인해 모든걸 설명하지 못한것을 비판하는건 단순히 트집잡기에 불과하여 글을 약 반년간 방치했는데요.
 이번에 저도 분산 시스템의 안정성을 검증해야하는 일이 생겨서 좋은 훈련으로 사용해보았습니다.
 
 > 멋진 캐시 적용 아티클을 비난하고싶은 마음은 없습니다. 토스 뱅크는 매우 거대한 시스템을 안정적으로 운영하는 최고의 기술력을 가진 은행입니다. 
@@ -34,7 +34,7 @@ write시에 cache evict하는 타이밍은 db에 commit이 된 다음 applicatio
 
 ## 일관성 모델
 
-원 블로그에서는 처음에 강한 일관성(Strong Consistency, 혹은 Linearizability)을 의도하고 시스템을 만들다가 후반부에는 비교적 약한 일관성을 가진 시스템으로 타협하게 됩니다.
+원 블로그에서는 처음에 강한 일관성(Strong Consistency, 혹은 Linearizability)을 의도하면서 구현을 이어나가다가 후반부에는 비교적 약한 일관성을 보장하기로 결정합니다.
 
 | "약관 동의 또는 철회 요청 API 처리가 완료된 순간, 바로 다음 요청에 DB에 저장된 값이 응답되어야 한다"
 
@@ -112,6 +112,8 @@ ReadYourWriteConsistency ==
 
 TLA+로 위처럼 모델링할 수 있습니다. client는 마지막에 write가 성공한 값이 그 다음 read의 결과로 나와야 한다는 것입니다. 참고로 client는 요청 하나씩만 처리할 수 있는 유저의 커넥션을 의미합니다. 이전 요청이 끝나지 않으면 다음 요청이 시작될 수 없습니다.
 
+여기서 Users는 사실 “세션(session)”을 의미합니다. 하나의 실제 유저는 여러 세션(웹/앱, 여러 탭 등)을 가질 수 있지만, 이 글에서 정의하는 Read-Your-Writes는 “각 세션 기준 RYW”입니다.
+
 ## 반례
 
 ![반례 시나리오 1](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/1-violence.svg?raw=true)
@@ -168,9 +170,9 @@ func read(userID string) string {
     }
 
     dbResult := db.findByID(userID)
-    redis.setNx(userID, dbResule)
+    redis.setNx(userID, dbResult)
 
-    return dbResule
+    return dbResult
 }
 
 func write(userID, newValue string) string {
@@ -218,9 +220,9 @@ func read(userID string) string {
     }
 
     dbResult := db.findByID(userID)
-    // redis.setNx(userID, dbResule) cache를 채우지 않는다
+    // redis.setNx(userID, dbResult) cache를 채우지 않는다
 
-    return dbResule
+    return dbResult
 }
 ```
 
@@ -268,14 +270,14 @@ TLA+로 검증한 결과, 160만가지의 상황을 시뮬레이션하였고 위
 
 Write에만 Lock을 잡는 것은 Monotonic Read를 만족할 수는 없지만, 중요한 속성은 아니기에 후술하겠습니다.
 
-### Or just use Compare and Set Mechanism
+### Or just use Versioned Conditional Set Mechanism
 
-Lock만 우리를 구원해줄까요? 다른 방법은 없을까요? 우리에게는 다른 방법도 존재합니다. 바로 Compare and Set(CAS)라고 불리는 방법이죠. 조금 더 약한 보장만 필요한 경우에 자주 사용되는 방법이죠. DB <-> Redis의 순서를 완전히 동일하게 맞추는 것이 아닌 **각 컴포넌트의 시간의 흐름이 거꾸로 가는 것을 막는** 방법입니다.
+Lock만 우리를 구원해줄까요? 다른 방법은 없을까요? 우리에게는 다른 방법도 존재합니다. 바로 Versioned Conditional Set(혹은 Last-Write-Wins with Version, LWW-V)라고 불리는 방법이죠. 조금 더 약한 보장만 필요한 경우에 자주 사용되는 방법이죠. DB <-> Redis의 순서를 완전히 동일하게 맞추는 것이 아닌 **각 컴포넌트의 시간의 흐름이 거꾸로 가는 것을 막는** 방법입니다. 각 값에 version을 부여하고, Redis는 오직 더 높은 version의 값만 받아들입니다. 이는 MVCC(Multi-Version Concurrency Control)의 단순화된 형태로도 볼 수 있습니다.
 
 보통의 경우 redis에서 lua/functions를 이용하여 값의 version을 확인해서 이전 버전에 대한 SET (NX)를 무시하는 것입니다. 이것도 Monotonic Read는 만족하지 못하지만, "Read Your Writes"를 만족하게 됩니다.
 
-CAS가 RYW를 만족시키는 이유는 Redis의 버전이 단조 증가하기 때문입니다. 
-Write 시점에 Redis의 logical clock을 해당 버전까지 끌어올리고, CAS는 이 clock이 후퇴하지 않음을 보장합니다.
+VCS가 RYW를 만족시키는 이유는 Redis의 버전이 단조 증가하기 때문입니다. 
+Write 시점에 Redis의 logical clock을 해당 버전까지 끌어올리고, VCS는 이 clock이 후퇴하지 않음을 보장합니다.
 따라서 Write 완료 후의 모든 Read는 최소한 그 버전 이상을 보게 됩니다.
 
 ### But redis have a TTL, and it's more complicated
@@ -297,13 +299,13 @@ Next ==
     \/ RedisTTLExpired
 ```
 
-이 경우에 우리의 마지막 모델인 Write CAS, Read SetNX는 RYW 일관성을 위반하게 됩니다.
+이 경우에 우리의 마지막 모델인 Write VCS, Read SetNX는 RYW 일관성을 위반하게 됩니다.
 
 ![반례 시나리오 6](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/6-violence.svg?raw=true)
 
 redis ttl이 있다고 하더라도 이렇게 순간적으로 없어지는 경우는 드물거에요. 그러나 redis의 메모리가 올라가면서 TTL이 지나지 않은 KEY들을 evict해버릴 수도 있습니다. 혹은 관리자가 캐시를 지우는 상황을 테스트하기 위하여 자신의 redis key를 unlink할 수도 있겠죠. 무슨일이든 redis cache가 만료될 가능성이 있다면 발생할 수 있는 케이스입니다.
 
-### 혹시 Read시에도 CAS를 쓰면 괜찮을까요?
+### 혹시 Read시에도 VCS를 쓰면 괜찮을까요?
 
 ```go
 func read(userID string) string {
@@ -313,7 +315,7 @@ func read(userID string) string {
     }
 
     dbResult := db.findByID(userID)
-    redis.cas(userID, dbResult)
+    redis.VCS(userID, dbResult)
 
     return dbResult
 }
@@ -323,7 +325,7 @@ func write(userID, newValue string) string {
     db.update(userID, newValue)
     db.commit()
 
-    redis.cas(userID, newValue)
+    redis.VCS(userID, newValue)
 
     return newValue
 }
@@ -352,7 +354,7 @@ func read(userID string) string {
     }
 
     dbResult := db.findByID(userID)
-    redis.cas(userID, dbResult)
+    redis.VCS(userID, dbResult)
     return dbdbResultResule
 }
 ```
@@ -371,7 +373,7 @@ func read(userID string) string {
     dbResult := db.findByID(userID)
 
     l := distLock.lock(userID) // cache miss시에 redis에 넣기전 lock
-    redis.cas(userID, dbResult)
+    redis.VCS(userID, dbResult)
     distLock.unlock(l)
 
     return dbResult
@@ -394,7 +396,7 @@ func read(userID string) string {
     l := distLock.lock(userID)
 
     dbResult := db.findByID(userID)
-    redis.cas(userID, dbResult)
+    redis.VCS(userID, dbResult)
 
     distLock.unlock(l)
 
@@ -408,7 +410,7 @@ func read(userID string) string {
 
 ### 정말 이런 상황이 발생할 수 있는가?
 
-분산 시스템의 edge case를 이야기하면 항상 따라오는 질문입니다.
+분산 시스템의 edge VCSe를 이야기하면 항상 따라오는 질문입니다.
 
 - "그게 정말 일어나?"
 - "확률이 얼마나 되는데?"
@@ -419,7 +421,7 @@ func read(userID string) string {
 갑자기 ACK, RST도 주지 않고 네트워크가 죽어버리는 경우는 어떤 제품은 한번도 겪지 않을 수도 있습니다.
 그러나 발생하지 않는 것은 아닙니다. 모든 것은 확률과 리스크에 달렸죠.
 
-클로드와 함께 구체적인 수치로 살펴봅시다.
+간단한 산술로 대략적인 규모를 살펴볼까요? 잘못되었을 가능성이 매우 높은 가정들이기에 실제와 다릅니다.
 
 가정:
 - 읽기 요청: 10,000건/초
@@ -449,7 +451,7 @@ $$P(\text{충돌}) = \frac{2}{5,000} = 0.04\%$$
 
 ## 일관성 모델을 정의하고 지켜나가는 방법
 
-일관성을 보장하는 건 공짜가 아닙니다. 분산 락은 latency를 추가하고, CAS는 구현 복잡도를 높이며, TTL을 제거하면 메모리 비용이 증가합니다.
+일관성을 보장하는 건 공짜가 아닙니다. 분산 락은 latency를 추가하고, VCS는 구현 복잡도를 높이며, TTL을 제거하면 메모리 비용이 증가합니다.
 어떤 선택이 맞는지는 비즈니스 요구사항에 달려있습니다.
 
 중요한 건 어떤 일관성 모델을 선택했는지 명확히 알고, 그에 맞는 정확한 구현을 하는 것입니다. 일관성 모델을 잘 지키기는게 중요하다면 그걸 중요하게 모델링하세요.
