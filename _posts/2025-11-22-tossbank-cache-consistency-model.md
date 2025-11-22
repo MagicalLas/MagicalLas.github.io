@@ -11,7 +11,7 @@ category: essay
 꽤나 어려워보이는 개념들을 이야기하면서 멋진 시스템 개선 방식을 소개하고있어서 즐겁게 읽었습니다. 
 한편으로는 분산 시스템에서의 strong consistency를 적용하는 방식이 꽤나 특이하다는 느낌도 받았습니다. 
 읽다보니 점점 엄밀한 잣대로 글을 읽게 되더군요. 제 안의 분산시스템 악마가 깨어나고 있었습니다.
-이렇게 간단히 성능 저하 없이 문제글 잘 해결하는게 불가능하다는 생각이 들면서 몇가지 반례를 찾아내었습니다.
+이렇게 간단히 성능 저하 없이 문제를 잘 해결하는게 불가능하다는 생각이 들면서 몇가지 반례를 찾아내었습니다.
 이미 저 글의 표현이 잘못되었다는건 확인했지만, 단순히 트집잡기에 불과하여 글을 약 반년간 방치했는데요.
 이번에 저도 분산 시스템의 안정성을 검증해야하는 일이 생겨서 좋은 훈련으로 사용해보았습니다.
 
@@ -32,7 +32,7 @@ write시에 cache evict하는 타이밍은 db에 commit이 된 다음 applicatio
 
 ## 일관성 모델
 
-원 불로그에서는 처음에 강한 일관성(Strong Consistency, 혹은 Linearizability)을 의도하고 시스템을 만들다가 후반부에는 비교적 약한 일관성을 가진 시스템으로 타협하게 됩니다.
+원 블로그에서는 처음에 강한 일관성(Strong Consistency, 혹은 Linearizability)을 의도하고 시스템을 만들다가 후반부에는 비교적 약한 일관성을 가진 시스템으로 타협하게 됩니다.
 
 | "약관 동의 또는 철회 요청 API 처리가 완료된 순간, 바로 다음 요청에 DB에 저장된 값이 응답되어야 한다"
 
@@ -75,9 +75,9 @@ func read(userID string) string {
     }
 
     dbResult := db.findByID(userID)
-    redis.set(userID, dbResule)
+    redis.set(userID, dbResult)
 
-    return dbResule
+    return dbResult
 }
 
 func write(userID, newValue string) string {
@@ -93,7 +93,7 @@ func write(userID, newValue string) string {
 꽤나 간단하죠? Golang으로 작성되었지만 kotlin, spring도 비슷하게 동작할겁니다.
 
 대부분의 어플리케이션에서는 유저가 한번에 단 하나의 호출만 하는 경우는 드뭅니다. 속도와 성능을 위하여 여러 호출이 동시에 진행되죠.
-또만 서버가 여러개 존재하는 MSA로 구성되어있다면 요청 하나가 동일한 TermsServer를 여러번 호출하는 경우도 빈번할 것입니다.
+또한 서버가 여러개 존재하는 MSA로 구성되어있다면 요청 하나가 동일한 TermsServer를 여러번 호출하는 경우도 빈번할 것입니다.
 내부적으로 요청이 퍼지면서 거의 동일한 시점에 여러 요청이 동시에 처리될 수 있죠.
 
 ![요청 스프레드](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/req-spread.svg?raw=true)
@@ -112,8 +112,7 @@ TLA+로 위처럼 모델링할 수 있습니다. client는 마지막에 write가
 
 ## 반례
 
-
-![반례 시나리오 3](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/1-violence.svg?raw=true)
+![반례 시나리오 1](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/1-violence.svg?raw=true)
 
 이렇게 단순한 모델, 그리고 네트워크 지연만 있는 경우에도 문제는 발생합니다. 문제가 되는 시퀀스를 하나 보여드리겠습니다. Set이 지연해서 도착하면서 unlink가 되었지만 기존값으로 캐시가 채워진 모습입니다. 단일 요청 흐름에서 보더라도 동시에 2가지 요청이 수행되는 경우 실제로 write가 성공했지만 이전값이 나온다는 점입니다. 자신의 쓰기가 무시된 상태죠.
 
@@ -245,9 +244,9 @@ func read(userID string) string {
     }
 
     dbResult := db.findByID(userID)
-    redis.setNx(userID, dbResule)
+    redis.setNx(userID, dbResult)
 
-    return dbResule
+    return dbResult
 }
 
 func write(userID, newValue string) string {
@@ -312,9 +311,9 @@ func read(userID string) string {
     }
 
     dbResult := db.findByID(userID)
-    redis.cas(userID, dbResule)
+    redis.cas(userID, dbResult)
 
-    return dbResule
+    return dbResult
 }
 
 func write(userID, newValue string) string {
@@ -332,11 +331,13 @@ func write(userID, newValue string) string {
 
 ### 혹시 Write시점에 Lock을 잡은 모델이면 괜찮을까요?
 
+아뇨, 괜찮지 않습니다. 반례 시나리오는 다음과 같습니다.
+
 ![반례 시나리오 8](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/8-violence.svg?raw=true)
 
 ### Read&Write에 하나의 Lock을 잡으면 해결될까요?
 
-유저별로 강한 일관성을 가져갈 수도 있는 방법이죠. 한번에 Read 혹은 Write 요청 하나만 수행되는겁니다. 
+유저별로 강한 일관성을 가져갈 수도 있는 방법이죠. 한번에 Read 혹은 Write 요청 하나만 수행되는겁니다. 아주 강력한 방법이기에 이걸 시도해보죠.
 
 ```go
 func read(userID string) string {
@@ -349,8 +350,8 @@ func read(userID string) string {
     }
 
     dbResult := db.findByID(userID)
-    redis.cas(userID, dbResule)
-    return dbResule
+    redis.cas(userID, dbResult)
+    return dbdbResultResule
 }
 ```
 
@@ -368,10 +369,10 @@ func read(userID string) string {
     dbResult := db.findByID(userID)
 
     l := distLock.lock(userID) // cache miss시에 redis에 넣기전 lock
-    redis.cas(userID, dbResule)
+    redis.cas(userID, dbResult)
     distLock.unlock(l)
 
-    return dbResule
+    return dbResult
 }
 ```
 
@@ -391,11 +392,11 @@ func read(userID string) string {
     l := distLock.lock(userID)
 
     dbResult := db.findByID(userID)
-    redis.cas(userID, dbResule)
+    redis.cas(userID, dbResult)
 
     distLock.unlock(l)
 
-    return dbResule
+    return dbResult
 }
 ```
 
