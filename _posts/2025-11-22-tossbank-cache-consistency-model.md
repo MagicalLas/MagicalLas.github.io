@@ -57,16 +57,43 @@ Monotonic Read(No-Flickering)과 같은 속성은 지금은 무시하도록합�
 개발자 한명이 생각할 수 있는 시나리오는 고작해야 한번에 20가지가 전부이고, 수천만건이 있는 상황을 빠짐없이 시뮬레이션하는 것은 불가능하죠. 이는 컴퓨터가 잘 하는 것입니다. 
 어떤 컴포넌트의 문제가 있다는 것을 잘 드러낼 수 있는 방법인 Formal Method를 사용하여 모델링을 시작해보겠습니다.
 
-유저는 한명이지만, 동시에 여러 요청을 보낼 수 있다고 가정하겠습니다.
-App에서 요청을 보내는 경우 단 하나의 요청만 보내는 경우는 거의 없기도하고, 서버 안에서 요청이 퍼지면서 여러 요청으로 퍼지면서 비슷한 요청이 동시에 들어올 수도 있습니다.
-아주 단순한 user -> server -> db & redis 모델입니다. 각 컴포넌트 간의 통신은 network로 통신하며 순서가 바뀔 수 있습니다. 물론 tcp 기반으로 생각하고있기에 커넥션 단위의 메시지 순서가 바뀌지 않습니다. 네트워크는 유실도 일어나지 않습니다.
+아주 단순한 user -> server -> db & redis 모델입니다. 각 컴포넌트 간의 통신은 network로 통신하며 순서가 바뀔 수 있습니다. 물론 tcp 기반으로 생각하고있기에 커넥션 단위의 메시지 순서가 바뀌지 않습니다. 네트워크는 유실도 일어나지 않습니다. 현실세계에 비하면 매우 너그러운 조건이죠.
 
 단순한 쓰기 & 읽기 시나리오입니다.
 
 ![읽기 시나리오](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/read-seq.svg?raw=true)
 ![쓰기 시나리오](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/write-seq.svg?raw=true)
 
-강한 일관성이라면 이러한 문제에서 자유롭겠지요. 하지만 우리는 그정도로 원하지 않으니 단 하나의 속성만 체크하겠습니다. 
+의사 코드는 아래와 같습니다.
+```go
+func read(userID string) string {
+    result := redis.get(userID)
+    if result != nil {
+        return result
+    }
+
+    return db.findByID(userID)
+}
+
+func write(userID, newValue string) string {
+    db.openTransaction()
+    db.update(userID, newValue)
+    db.commit()
+
+    redis.unlink(userID) // wait for unlink done
+    return newValue
+}
+```
+
+꽤나 간단하죠? Golang으로 작성되었지만 kotlin, spring도 비슷하게 동작할겁니다.
+
+대부분의 어플리케이션에서는 유저가 한번에 단 하나의 호출만 하는 경우는 드뭅니다. 속도와 성능을 위하여 여러 호출이 동시에 진행되죠.
+또만 서버가 여러개 존재하는 MSA로 구성되어있다면 요청 하나가 동일한 TermsServer를 여러번 호출하는 경우도 빈번할 것입니다.
+내부적으로 요청이 퍼지면서 거의 동일한 시점에 여러 요청이 동시에 처리될 수 있죠.
+
+![요청 스프레드](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/req-spread.svg?raw=true)
+
+강한 일관성이라면 이러한 문제에서 자유로워야합니다. 하지만 우리는 그정도로 원하지 않으니 단 하나의 속성만 체크하겠습니다.
 동일한 유저의 요청 스레드라면 자신이 write에 성공한 이후에 새로 시작하는 read에서는 write가 반영되어야한다는 것입니다.
 
 ```tla
@@ -76,9 +103,12 @@ ReadYourWriteConsistency ==
             clientView[u].version >= lastWriteVersion[u]
 ```
 
-아래와 같이 Read와 Write의 시퀀스가 만들어집니다. 모든 network은 지연이 있을 수 있지만, 단일 커넥션에 대하여 순서가 바뀌는 일은 없습니다. 또한 유실이 없고, 모든 요청은 실패하는 일이 없습니다. 실제로는 실패하는 경우도 있기에 더 상황이 복잡해집니다.
+TLA+로 위처럼 모델링할 수 있습니다. client는 마지막에 write가 성공한 값이 그 다음 read의 결과로 나와야 한다는 것입니다. 참고로 client는 요청 하나씩만 처리할 수 있는 유저의 커넥션을 의미합니다. 이전 요청이 끝나지 않으면 다음 요청이 시작될 수 없습니다.
 
 ## 반례
+
+
+![반례 시나리오](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/1-violence.svg?raw=true)
 
 ```d2
 shape: sequence_diagram
@@ -131,7 +161,7 @@ u2 <- s1: ReadResponse(v1)
 ## 서킷브레이커는 도움이 되지 않는다
 
 그리고 그 메커니즘은 분명히 서킷브레이커가 아닙니다. 저는 서킷브레이커를 아예 모델에 넣지도 않았는데요, 이는 redis 호출이 항상 성공하기 때문입니다. 위의 반례의 경우 unlink가 항상 성공하고있습니다.
-서킷 브레이커가 열리지 않고도 정합성 문제가 몇분이상 지속될 수 있다는걸 볼 수 있죠. 애초에 서킷브레이커는 문제 발생시의 차단 역할입니다. 근본적인 시스템의 허점을 막아주지 않습니다.
+서킷 브레이커가 열리지 않고도 정합성 문제가 몇분이상 지속될 수 있다는걸 볼 수 있죠. 애초에 서킷브레이커는 문제 발생시의 차단 역할입니다. 근본적인 시스템의 일관성 위반을 막아주지 않습니다.
 
 물론 서킷이 있다는 것은 실용적인 접근이고, 저는 서킷을 좋아합니다. 장애 차단 관점에서 얼마나 중요한지 잘 알고있습니다 ;)
 
