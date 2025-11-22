@@ -20,6 +20,8 @@ category: essay
 
 ## 아티클을 요약하자면
 
+**[이 아티클](https://toss.tech/article/34481)을 먼저 읽고, 저의 블로그를 읽으시길 강력히 권장합니다.**
+
 약관 데이터 서빙을 leader DB(아마 RDBMS겠죠?)에서만 수행하고 있었습니다. 이는 '강한 일관성;'이라고 하는 속성을 지키기 위함이라고 합니다.
 요청이 점점 늘어나감에 따라서 단일 DB 인스턴스로는 성능 한계에 도달하게 됩니다.
 따라서 빠르게 읽기를 할 수 있는 캐시 레이어를 도입합니다. 이때 redis를 캐시 저장소로 선택하고,
@@ -72,7 +74,10 @@ func read(userID string) string {
         return result
     }
 
-    return db.findByID(userID)
+    dbResult := db.findByID(userID)
+    redis.set(userID, dbResule)
+
+    return dbResule
 }
 
 func write(userID, newValue string) string {
@@ -108,47 +113,7 @@ TLA+로 위처럼 모델링할 수 있습니다. client는 마지막에 write가
 ## 반례
 
 
-![반례 시나리오](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/1-violence.svg?raw=true)
-
-```d2
-shape: sequence_diagram
-
-u1: "User 1"
-u2: "User 2"
-s1: "Server 1"
-s2: "Server 2"
-redis: "Redis"
-db: "Database"
-
-db.v=1
-
-u1 -> s1: ReadReqeust
-s1 -> redis: Get
-s1 <- redis: Missed
-
-s1 -> db: Select
-s1 <- db: Result(v=1)
-
-u2 -> s2: WriteReqeust
-s2 -> db: Update
-db -> db: (v' = v+1)
-s2 <- db: Result(v=2)
-s2 -> redis: Unlink
-u2 <- s2: WriteRseponse(v=2)
-
-u2.lastSeen = "v=2"
-
-s1 -> redis: Set(v=1)
-redis.value = "v=1"
-s1 <- redis: SetOk
-
-u1 <- s1: ReadResponse(v=1)
-
-u2 -> s1: ReadReqeust
-s1 -> redis: Get
-s1 <- redis: Hit(v=1)
-u2 <- s1: ReadResponse(v1)
-```
+![반례 시나리오 3](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/1-violence.svg?raw=true)
 
 이렇게 단순한 모델, 그리고 네트워크 지연만 있는 경우에도 문제는 발생합니다. 문제가 되는 시퀀스를 하나 보여드리겠습니다. Set이 지연해서 도착하면서 unlink가 되었지만 기존값으로 캐시가 채워진 모습입니다. 단일 요청 흐름에서 보더라도 동시에 2가지 요청이 수행되는 경우 실제로 write가 성공했지만 이전값이 나온다는 점입니다. 자신의 쓰기가 무시된 상태죠.
 
@@ -158,73 +123,333 @@ u2 <- s1: ReadResponse(v1)
 
 발생하지 않게 만드려면 지금의 구조로는 부족합니다. 추가적인 매커니즘이 필요해요.
 
-## 서킷브레이커는 도움이 되지 않는다
+### 서킷브레이커는 도움이 되지 않는다
 
 그리고 그 메커니즘은 분명히 서킷브레이커가 아닙니다. 저는 서킷브레이커를 아예 모델에 넣지도 않았는데요, 이는 redis 호출이 항상 성공하기 때문입니다. 위의 반례의 경우 unlink가 항상 성공하고있습니다.
 서킷 브레이커가 열리지 않고도 정합성 문제가 몇분이상 지속될 수 있다는걸 볼 수 있죠. 애초에 서킷브레이커는 문제 발생시의 차단 역할입니다. 근본적인 시스템의 일관성 위반을 막아주지 않습니다.
 
 물론 서킷이 있다는 것은 실용적인 접근이고, 저는 서킷을 좋아합니다. 장애 차단 관점에서 얼마나 중요한지 잘 알고있습니다 ;)
 
-## Unlink를 DB Transaction안에서 수행하는건 도움이 되지 않는다
+### Unlink를 DB Transaction안에서 수행하는건 도움이 되지 않는다
 
 몇가지 변형을 가하면, 단순한 수정으로 이런 일관성 속성을 개선할 수 있을까요? 지금은 AFTER_COMMIT으로 DB에 커밋한 다음 redis에서 unlink를 수행합니다. 만약 Transaction commit 전에 unlink를 한다면 어떻게 될까요?
 
 여전히 동일한 문제는 남습니다. 아래 시나리오로 확인할 수 있습니다.
 
-```
-
-```
+![반례 시나리오 2](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/2-violence.svg?raw=true)
 
 **(1)DB Commit -> Unlink와 (2)Read Path에서의 DB Read->Set간의 순서 불일치**가 현상의 원인입니다. 1번과 2번이 각각 Atomic하지 않기에 DB에서의 순서는 존재하지만 Redis에서의 순서는 DB의 순서와 달라지기 때문입니다.
 
 혹시 너무나 마법적인 일이 일어나서 DB에 commit하는 순간 redis도 unlink가 일어난다면 어떻게 될까요? 동일하게 TLA+로 모델링해보겠습니다.
 
-```
-```
+![반례 시나리오 3](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/3-violence.svg?raw=true)
 
 그래도 여전히 동일한 문제가 남습니다. 이는 순서가 바뀌었다는걸 모르기 때문입니다. 1번이 Atomic하더라도 2번이 Atomic하지 않으면, 혹은 2번의 순서가 바뀌어서 수행될 수 있다면 문제가 존재합니다.
 
-## redis SET NX를 사용해도 도움이 되지 않는다
+### redis SET NX를 사용해도 도움이 되지 않는다
 
-혹시 Read시에 보통 SET NX를 사용하면 값이 이미 있는 경우 무시하는 속성을 사용해서 해결할 수 있을까요? 종종 SET NX를 사용하는게 좋다는 이야기를 어디선가 들었던 기억도 납니다. 하지만 실제로는 도움이 되지 않습니다. 이전 시나리오만 보더라도 SET NX로 바뀐들 해결되지 않습니다. 결국 DB의 순서와 redis의 순서가 맞춰져야합니다.
+혹시 Read시에 보통 SET NX를 사용하면 값이 이미 있는 경우 무시하는 속성을 사용해서 해결할 수 있을까요? 종종 SET NX를 사용하는게 좋다는 이야기를 어디선가 들었던 기억도 납니다. 하지만 실제로는 도움이 되지 않습니다. 이전 시나리오만 보더라도 SET NX로 바뀐들 해결되지 않습니다. 위에서 나온 반례 시나리오 1, 2, 3을 참고하세요. **결국 DB의 순서와 redis의 순서가 맞춰져야합니다.**
 
-## Write에서도 Cache를 채우도록 해도 도움이 되지 않는다
+### Write에서도 Cache를 채우도록 해도 도움이 되지 않는다
 
-Read할 때 캐시를 채우는 경우 여러가지 방법을 넣어도 크게 도움이 되지 않네요. 이제 Write를 같이 살펴봐야겠습니다. Read가 아니라 Write에서 SET을 수행하는겁니다. 계속해서 읽을 때 캐시를 이전값으로 채우는게 문제라면, 쓰기시점에 제일 최신값으로 업데이트할 수 있을겁니다.
+Read할 때 캐시를 채우는 경우 여러가지 방법을 넣어도 크게 도움이 되지 않네요. 계속해서 읽을 때 캐시를 이전값으로 채우는게 문제라면, 쓰기시점에 제일 최신값으로 업데이트할 수 있을겁니다. Read가 아니라 Write에서 SET을 수행하는겁니다. 이제 조금 더 근본적인 시스템의 재설계가 수행됩니다.
 
-DB에 commit이 되지 않은 데이터를 set을 할 수는 없으니 commit된 이후에 SET을 수행하도록합니다. commit되지 않은 값을 set해서 최신값이 미리 보이는 것이 RYW 일관성에서는 문제는 아닐 수 있습니다. 하지만 모종의 이유로 Transaction Commit이 실패한다면 DB와 redis의 상태가 깨지게 됩니다. redis는 잘못된 값이 저장되고, 순간의 상황에서 그 잘못된 값이 서빙되겠죠.
+Write시점에 Redis에 값을 넣는 타이밍을 정해야합니다. 이건 단 한가지 방법밖에 없습니다. DB에 commit이 되지 않은 데이터를 set을 할 수는 없으니 commit된 이후에 SET을 수행하도록합시다. commit되지 않은 값을 set해서 최신값이 미리 보이는 것이 RYW 일관성에서는 문제는 아닐 수 있습니다. 하지만 모종의 이유로 Transaction Commit이 실패한다면 DB와 redis의 상태가 깨지게 됩니다. redis는 잘못된 값이 저장되고, 순간의 상황에서 그 잘못된 값이 서빙되겠죠.
 
-이번 케이스에서는 Read에서 SET NX를 사용하면서 Write Path에서 SET NX를 사용하지 않는 시나리오를 검증하겠습니다. Read Path에서 Write Path의 최신값으로 수행하는 SET을 무시하고싶지는 않을테니까요.
+Read시점에 Redis에 값을 채우는 매커니즘도 단 한가지만 존재합니다. 바로 SET NX이죠. Write시점에 채운 캐시를 Read시점에 더 이전값으로 채울 수 있기 때문이죠. 따라서 이번 케이스에서는 Read에서 SET NX를 사용하면서 Write Path에서 SET NX를 사용하지 않는 시나리오를 검증하겠습니다.
 
-그러나 여전히 동일한 문제가 존재합니다.
+의사 코드는 아래와 같습니다.
+```go
+func read(userID string) string {
+    result := redis.get(userID)
+    if result != nil {
+        return result
+    }
 
-## Write에서만 Cache를 채우도록 해도 도움이 되지 않는다
+    dbResult := db.findByID(userID)
+    redis.setNx(userID, dbResule)
 
-Read에서 채우지않고, Write시에만 채우게하면 문제가 없을까요? 아뇨, 여전히 문제가 있습니다.
+    return dbResule
+}
 
-지금까지 몇가지 생각나는, 흔히 시도하는 방법들에 대하여 시도해보았지만 문제가 사라지지 않았습니다.
+func write(userID, newValue string) string {
+    db.openTransaction()
+    db.update(userID, newValue)
+    db.commit()
+
+    redis.set(userID, newValue)
+    return newValue
+}
+```
+
+| 혹시 글을 읽은 과정에서 순간적으로 "이것도 안되겠네. 이런 경우도 있잖아"하면서 구체적인 시나리오가 생각나셨나요?
+
+그러나 여전히 동일한 문제가 존재합니다. 아래 시나리오를 한번 보시죠.
+
+![반례 시나리오 4](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/4-violence.svg?raw=true)
+
+직전 시나리오를 보니까 Write가 동시에 처리되는 경우 덮어씌우는게 문제로 보입니다. SET NX로 위 케이스는 해소할 수 있을 것 같습니다. Write시에도 SET NX를 사용하면 어떻게 될까요?
+
+```go
+func write(userID, newValue string) string {
+    db.openTransaction()
+    db.update(userID, newValue)
+    db.commit()
+
+    redis.setNx(userID, newValue)
+    return newValue
+}
+```
+
+![반례 시나리오 5](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/5-violence.svg?raw=true)
+
+결국 Write요청이 동시에 오게된다면 DB가 Serializable하더라도 Redis에 저장되는 값은 DB와 다른 순서를 가지게 됩니다. 
+
+### Write에서만 Cache를 채우도록 해도 도움이 되지 않는다
+
+Read에서 채우지않고, Write시에만 채우게하면 문제가 없을까요?
+
+```go
+func read(userID string) string {
+    result := redis.get(userID)
+    if result != nil {
+        return result
+    }
+
+    dbResult := db.findByID(userID)
+    // redis.setNx(userID, dbResule) cache를 채우지 않는다
+
+    return dbResule
+}
+```
+
+아마 여러분들이라면 1초만에 답하실 수 있을겁니다. 직전 케이스들 모두 Write 충돌로 인한 문제였습니다. Read는 관여하지 않았죠. **핵심은 여전히 DB의 순서와 Redis의 순서의 불일치입니다.**
+
+지금까지 몇가지 생각나는, 흔히 시도하는 방법들에 대하여 시도해보았지만 문제가 사라지지 않았습니다. 이제는 그만 탐색하고 해결책을 이야기해보겠습니다.
 
 ## RYW 일관성을 만족시키는 방법
 
 문제는 DB Commit과 Redis SET이 원자적이지 않다는 것입니다. 이를 원자적으로 만들면 문제가 해결됩니다.
 
 ### Locks will save us
-약관의 경우 Read Heavy한 패턴이기에 합리적인 방법입니다. 이 방법의 경우 Read에서 SET NX를 쓰고, Write시에 Lock으로 순서를 엄밀히 보장하면 적어도 "Read Your Writes"는 보장합니다.
 
-Write에만 Lock을 잡는 것은 Monotonic Read를 만족할 수는 없지만, 중요한 속성은 아닐 수 있습니다.
+Lock은 분산 시스템에서 아주 강력한 도구입니다. Lock이 우리를 구해주는 것은 자명합니다. 강력한만큼 부작용도 있습니다. 꽤나 오버헤드가 크다는 문제가 존재하죠.
+
+최소한으로 Lock을 잡기 위하여 쓰기시점에만 Lock을 잡아서 일관성을 맞출 수 있습니다. 약관의 경우 Read Heavy한 패턴이기에 합리적인 방법입니다. 이 방법의 경우 Read에서 SET NX를 쓰고, Write시에 Lock으로 DB와 Redis의 순서를 엄밀히 보장하면 "Read Your Writes"는 보장합니다.
+
+```go
+func read(userID string) string {
+    result := redis.get(userID)
+    if result != nil {
+        return result
+    }
+
+    dbResult := db.findByID(userID)
+    redis.setNx(userID, dbResule)
+
+    return dbResule
+}
+
+func write(userID, newValue string) string {
+    l := distLock.lock(userID)
+    defer distLock.unlock(l) // 이 함수의 결과가 반환될때 release
+
+    db.openTransaction()
+    db.update(userID, newValue)
+    db.commit()
+
+    redis.set(userID, newValue)
+    return newValue
+}
+```
+
+TLA+로 검증한 결과, 160만가지의 상황을 시뮬레이션하였고 위반하는 경우가 없다는 것을 확인하였습니다. read시점에 이전값이 저장될 수 있지만, write시점에 항상 최신값으로 순서대로 반영되기에 정합성 문제에서 승리하게 되었습니다.
+
+Write에만 Lock을 잡는 것은 Monotonic Read를 만족할 수는 없지만, 중요한 속성은 아니기에 후술하겠습니다.
 
 ### Or just use Compare and Set Mechanism
 
-CAS처럼 redis에서 version을 확인해서 이전 버전에 대한 SET (NX)를 무시하는 것입니다. 이것도 Monotonic Read는 만족하지 못하지만, "Read Your Writes"를 만족하게 됩니다.
+Lock만 우리를 구원해줄까요? 다른 방법은 없을까요? 우리에게는 다른 방법도 존재합니다. 바로 Compare and Set(CAS)라고 불리는 방법이죠. 조금 더 약한 보장만 필요한 경우에 자주 사용되는 방법이죠. DB <-> Redis의 순서를 완전히 동일하게 맞추는 것이 아닌 **각 컴포넌트의 시간의 흐름이 거꾸로 가는 것을 막는** 방법입니다.
 
-## Monitonic Read를 만족시키는 방법
+보통의 경우 redis에서 lua/functions를 이용하여 값의 version을 확인해서 이전 버전에 대한 SET (NX)를 무시하는 것입니다. 이것도 Monotonic Read는 만족하지 못하지만, "Read Your Writes"를 만족하게 됩니다.
 
-Flickering은 되게 좋지 않은 현상입니다. 사용자입장에서는 최신값이 나왔다가, 다시 이전값이 나오고, 또 다시 최신값이 나오는 현상을 만나게 됩니다.
-계좌 잔액이라고하면 돈이 들어왔다 나가는것처럼 보일 수 있죠.
+CAS가 RYW를 만족시키는 이유는 Redis의 버전이 단조 증가하기 때문입니다. 
+Write 시점에 Redis의 logical clock을 해당 버전까지 끌어올리고, CAS는 이 clock이 후퇴하지 않음을 보장합니다.
+따라서 Write 완료 후의 모든 Read는 최소한 그 버전 이상을 보게 됩니다.
 
-## Strong Consistency를 만족시키는 방법
+### But redis have a TTL, and it's more complicated
 
+보통의 경우 redis는 모든 데이터를 memory에 올려서 동작합니다. 메모리는 비교적 희소한 자원이기에 DB의 모든 데이터를 항상 메모리에 올려두고있는 것은 바람직하지 않습니다.
+또한 redis의 역할을 캐시 레이어이기 때문에 자주 조회되는 데이터에 대하여 저장하면 되죠. 따라서 TTL을 걸어두고 사용하게 됩니다.
+특정 시간이 지나면 그 데이터는 메모리에서 내려가고 전체 데이터중에 일부만 저장하고 잇게 됩니다. 캐시는 HitRate이 매우 중요한데 적절하게 TTL이나 캐시 만료 정책을 세워서 운영해야합니다. 오늘은 캐시 Expire 전략을 이야기하는 시간은 아니기에 이정도로 줄입니다.
 
+중요한 것은 redis에 저장된 데이터는 항상 남아있는게 아니라 종종 사라진다는 것입니다. 실제로 발생하는 케이스인데도 우리의 모델에는 그게 없죠.
+TTL대신에 redis에 있는 데이터 일부가 random하게 사라지는 경우를 모델링하겠습니다.
+
+```text
+RedisTTLExpired ==
+    /\ redisValue' = NoneVal
+    /\ UNCHANGED << dbValue, serverState, clientView, clientState, clientRequestType, lastWriteVersion, msgs >>
+
+Next ==
+    ...
+    \/ RedisTTLExpired
+```
+
+이 경우에 우리의 마지막 모델인 Write CAS, Read SetNX는 RYW 일관성을 위반하게 됩니다.
+
+![반례 시나리오 6](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/6-violence.svg?raw=true)
+
+redis ttl이 있다고 하더라도 이렇게 순간적으로 없어지는 경우는 드물거에요. 그러나 redis의 메모리가 올라가면서 TTL이 지나지 않은 KEY들을 evict해버릴 수도 있습니다. 혹은 관리자가 캐시를 지우는 상황을 테스트하기 위하여 자신의 redis key를 unlink할 수도 있겠죠. 무슨일이든 redis cache가 만료될 가능성이 있다면 발생할 수 있는 케이스입니다.
+
+### 혹시 Read시에도 CAS를 쓰면 괜찮을까요?
+
+```go
+func read(userID string) string {
+    result := redis.get(userID)
+    if result != nil {
+        return result
+    }
+
+    dbResult := db.findByID(userID)
+    redis.cas(userID, dbResule)
+
+    return dbResule
+}
+
+func write(userID, newValue string) string {
+    db.openTransaction()
+    db.update(userID, newValue)
+    db.commit()
+
+    redis.cas(userID, newValue)
+
+    return newValue
+}
+```
+
+![반례 시나리오 7](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/7-violence.svg?raw=true)
+
+### 혹시 Write시점에 Lock을 잡은 모델이면 괜찮을까요?
+
+![반례 시나리오 8](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/8-violence.svg?raw=true)
+
+### Read&Write에 하나의 Lock을 잡으면 해결될까요?
+
+유저별로 강한 일관성을 가져갈 수도 있는 방법이죠. 한번에 Read 혹은 Write 요청 하나만 수행되는겁니다. 
+
+```go
+func read(userID string) string {
+    l := distLock.lock(userID)
+    defer distLock.unlock(l) // 이 함수의 결과가 반환될때 release
+
+    result := redis.get(userID)
+    if result != nil {
+        return result
+    }
+
+    dbResult := db.findByID(userID)
+    redis.cas(userID, dbResule)
+    return dbResule
+}
+```
+
+이 상황에서 동시성이라는건 없습니다. TLA+로 300만개의 유니크한 경우의 수를 전부 시뮬레이션해보아도 일관성이 깨지는 현상을 발견하지 못합니다.
+
+하지만 모든 Read & Write 요청에서 Lock을 잡는건 비효율적입니다. Read Heavy한 트래픽이기도 하지만, Redis 정합성을 위하여 Redis Cache Hit의 경우에도 Lock을 잡기 때문이죠. 그러면 이렇게 Redis에 값을 넣는 시점에만 Lock을 잡으면 어떨까요? 아래 의사코드를 작성했습니다.
+
+```go
+func read(userID string) string {
+    result := redis.get(userID)
+    if result != nil {
+        return result
+    }
+
+    dbResult := db.findByID(userID)
+
+    l := distLock.lock(userID) // cache miss시에 redis에 넣기전 lock
+    redis.cas(userID, dbResule)
+    distLock.unlock(l)
+
+    return dbResule
+}
+```
+
+이 경우는 아쉽게도 커버하지 못하는 경우가 생겼습니다. 하지만 좋은 접근이에요.
+
+![반례 시나리오 9](https://github.com/MagicalLas/MagicalLas.github.io/blob/master/_screenshots/9-violence.svg?raw=true)
+
+그러면 Cache miss된 시점, DB Read 이전에 Lock을 잡으면 어떨까요?
+
+```go
+func read(userID string) string {
+    result := redis.get(userID)
+    if result != nil {
+        return result
+    }
+
+    l := distLock.lock(userID)
+
+    dbResult := db.findByID(userID)
+    redis.cas(userID, dbResule)
+
+    distLock.unlock(l)
+
+    return dbResule
+}
+```
+
+이렇게 작성한다면 RYW 일관성을 지킬 수 있습니다. 매우 많은 경우와 구현이 있고 복잡하지 않나요?
+
+| 자신이 쓴걸 그 다음 요청에서 읽을 수 있게 만드는 것은 매우 세심하게 설계되어야합니다.
+
+### 정말 이런 상황이 발생할 수 있는가?
+
+분산 시스템의 edge case를 이야기하면 항상 따라오는 질문입니다. 
+
+- "그게 정말 일어나?"
+- "확률이 얼마나 되는데?"
+- "우리는 안 일어날 것 같은데?"
+- 등등 많은 질문들...
+
+아마도 거의 일어나지 않을거에요. Network 지연이 그렇게 크지 않을거고, STW 시간이 몇분씩 걸리지도 않겠죠.
+갑자기 ACK, RST도 주지 않고 네트워크가 죽어버리는 경우는 어떤 제품은 한번도 겪지 않을 수도 있습니다.
+그러나 발생하지 않는 것은 아닙니다. 모든 것은 확률과 리스크에 달렸죠.
+
+클로드와 함께 구체적인 수치로 살펴봅시다.
+
+가정:
+- 읽기 요청: 10,000건/초
+- 쓰기 요청: 10건/초 (피크)
+- 동시 접속 유저: 5,000명
+- 쓰기 duration: 200ms (GC는 10ms + 네트워크 RTT 2ms로 가정시)
+
+**동시 진행 중인 쓰기:**
+$$10 \times 0.2 = 2\text{건}$$
+
+**동일 유저에게 요청이 겹칠 확률:**
+$$P(\text{충돌}) = \frac{2}{5,000} = 0.04\%$$
+
+**하루 기준 충돌 횟수:**
+- 읽기-쓰기 충돌: $10,000 \times 0.0004 \times 86,400 \approx 345,600\text{건}$
+- 쓰기-쓰기 충돌: $10 \times 0.0004 \times 86,400 \approx 346\text{건}$
+
+0.04%는 무시해도 될 것 같은 수치입니다. 쓰기-쓰기 충돌도 되게 적게 발생합니다. 아마 실제로는 더 적을 수도 있어요. 혹은 더 많을 수도 있습니다. 위에서 이야기한 요청 하나에서 여러 요청이 파생되는 경우는 거의 동시에 요청이 들어올 수도 있죠. 발생하지 않을 수도 있어요. 하지만 시간이 지나면서 계속 수행하다보면 언젠가 발생할 수 있습니다.
+
+### 우리가 가정하는 것들
+
+저는 이렇게 이야기하고싶습니다. 우리는 어떠한 가정에 기대고 있는지를 아는게 매우 중요합니다. 네트워크는 이렇고, STW는 저렇고, TTL은 어떻고, DB는 어떻게 동작하고 등등... 그리고 그 가정을 어느정도는 알고있지 못하면 가정이 깨졌을 때 문제를 식별하기 힘들어집니다. 혹은 그 가정을 스스로 깨트릴 수도 있습니다.
+
+결국 어디까지 리스크를 견딜것인지가 중요합니다. 그 관점에서 트레이드오프를 하는것이죠. 질문은 이겁니다. **"이 가정이 깨졌을 때 우리 시스템은 어떻게 동작하는가?"** 대답이 "모르겠다"라면, 그건 리스크를 관리하는 게 아니라 운에 맡기는 겁니다.
+
+또한 실제 우리 시스템이나 구현을 전부 모델링해서 검증하는게 아니라면 완벽히 안전하다는걸 검증할 수 없습니다. 하지만 우리의 시스템의 논리적인 버그를 잡는데 도와줍니다.
+
+## 일관성 모델을 정의하고 지켜나가는 방법
+
+일관성을 보장하는 건 공짜가 아닙니다. 분산 락은 latency를 추가하고, CAS는 구현 복잡도를 높이며, TTL을 제거하면 메모리 비용이 증가합니다.
+어떤 선택이 맞는지는 비즈니스 요구사항에 달려있습니다.
+
+중요한 건 어떤 일관성 모델을 선택했는지 명확히 알고, 그에 맞는 정확한 구현을 하는 것입니다. 일관성 모델을 잘 지키기는게 중요하다면 그걸 중요하게 모델링하세요.
 
 ## 마무리
 
