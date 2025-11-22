@@ -96,7 +96,7 @@ func write(userID, newValue string) string {
 강한 일관성이라면 이러한 문제에서 자유로워야합니다. 하지만 우리는 그정도로 원하지 않으니 단 하나의 속성만 체크하겠습니다.
 동일한 유저의 요청 스레드라면 자신이 write에 성공한 이후에 새로 시작하는 read에서는 write가 반영되어야한다는 것입니다.
 
-```tla
+```text
 ReadYourWriteConsistency ==
     \A u \in Users:
         clientView[u] # NoneVal =>
@@ -169,31 +169,34 @@ u2 <- s1: ReadResponse(v1)
 
 몇가지 변형을 가하면, 단순한 수정으로 이런 일관성 속성을 개선할 수 있을까요? 지금은 AFTER_COMMIT으로 DB에 커밋한 다음 redis에서 unlink를 수행합니다. 만약 Transaction commit 전에 unlink를 한다면 어떻게 될까요?
 
-여전히 동일한 문제는 남습니다.
+여전히 동일한 문제는 남습니다. 아래 시나리오로 확인할 수 있습니다.
 
 ```
+
 ```
 
-(1)DB Commit -> Unlink와 (2)Read Path에서의 DB Read->Set간의 순서 불일치가 현상의 원인입니다. 1번과 2번이 각각 Atomic하지 않기에 DB에서의 순서는 존재하지만 Redis에서의 순서는 DB의 순서와 달라지기 때문입니다.
+**(1)DB Commit -> Unlink와 (2)Read Path에서의 DB Read->Set간의 순서 불일치**가 현상의 원인입니다. 1번과 2번이 각각 Atomic하지 않기에 DB에서의 순서는 존재하지만 Redis에서의 순서는 DB의 순서와 달라지기 때문입니다.
 
 혹시 너무나 마법적인 일이 일어나서 DB에 commit하는 순간 redis도 unlink가 일어난다면 어떻게 될까요? 동일하게 TLA+로 모델링해보겠습니다.
 
 ```
 ```
 
-그래도 여전히 동일한 문제가 남습니다. 이는 ~~ 때문입니다. 1번이 Atomic하더라도 2번이 Atomic하지 않으면, 혹은 2번의 순서가 바뀌어서 수행될 수 있다면 문제가 존재합니다.
+그래도 여전히 동일한 문제가 남습니다. 이는 순서가 바뀌었다는걸 모르기 때문입니다. 1번이 Atomic하더라도 2번이 Atomic하지 않으면, 혹은 2번의 순서가 바뀌어서 수행될 수 있다면 문제가 존재합니다.
 
 ## redis SET NX를 사용해도 도움이 되지 않는다
 
-혹시 Read시에 보통 SET NX를 자주 사용해서 캐시를 채우는데 효과가 있을까요? 없습니다. 1번이 Atomic하게 되었고, 2번의 Atomic이나 순서 보장이 필요한데 SET NX는 둘 다 만족하지 못하기 때문이죠.
+혹시 Read시에 보통 SET NX를 사용하면 값이 이미 있는 경우 무시하는 속성을 사용해서 해결할 수 있을까요? 종종 SET NX를 사용하는게 좋다는 이야기를 어디선가 들었던 기억도 납니다. 하지만 실제로는 도움이 되지 않습니다. 이전 시나리오만 보더라도 SET NX로 바뀐들 해결되지 않습니다. 결국 DB의 순서와 redis의 순서가 맞춰져야합니다.
 
 ## Write에서도 Cache를 채우도록 해도 도움이 되지 않는다
 
-Read할 때 캐시를 채우는 경우 여러가지 방법을 넣어도 크게 도움이 되지 않네요. 이제 Write를 같이 살펴봐야겠습니다. Read가 아니라 Write에서 SET을 수행하는겁니다.
+Read할 때 캐시를 채우는 경우 여러가지 방법을 넣어도 크게 도움이 되지 않네요. 이제 Write를 같이 살펴봐야겠습니다. Read가 아니라 Write에서 SET을 수행하는겁니다. 계속해서 읽을 때 캐시를 이전값으로 채우는게 문제라면, 쓰기시점에 제일 최신값으로 업데이트할 수 있을겁니다.
 
-commit이 되지 않은 데이터를 set을 할 수는 없으니 commit된 이후에 SET을 수행하도록합니다. Read에서 SET NX를 사용하면서 Write Path에서 SET NX는 사용하지 않습니다. Read Path에서 Write Path의 SET을 무시하고싶지는 않을테니까요. (문제가 된다는걸 TLA+로 검증했지만, 귀찮음으로인해 서술하지 않습니다)
+DB에 commit이 되지 않은 데이터를 set을 할 수는 없으니 commit된 이후에 SET을 수행하도록합니다. commit되지 않은 값을 set해서 최신값이 미리 보이는 것이 RYW 일관성에서는 문제는 아닐 수 있습니다. 하지만 모종의 이유로 Transaction Commit이 실패한다면 DB와 redis의 상태가 깨지게 됩니다. redis는 잘못된 값이 저장되고, 순간의 상황에서 그 잘못된 값이 서빙되겠죠.
 
-여전히 동일한 문제가 존재합니다.
+이번 케이스에서는 Read에서 SET NX를 사용하면서 Write Path에서 SET NX를 사용하지 않는 시나리오를 검증하겠습니다. Read Path에서 Write Path의 최신값으로 수행하는 SET을 무시하고싶지는 않을테니까요.
+
+그러나 여전히 동일한 문제가 존재합니다.
 
 ## Write에서만 Cache를 채우도록 해도 도움이 되지 않는다
 
@@ -201,17 +204,27 @@ Read에서 채우지않고, Write시에만 채우게하면 문제가 없을까�
 
 지금까지 몇가지 생각나는, 흔히 시도하는 방법들에 대하여 시도해보았지만 문제가 사라지지 않았습니다.
 
-## 대안 1 - lock
+## RYW 일관성을 만족시키는 방법
 
 문제는 DB Commit과 Redis SET이 원자적이지 않다는 것입니다. 이를 원자적으로 만들면 문제가 해결됩니다.
 
+### Locks will save us
 약관의 경우 Read Heavy한 패턴이기에 합리적인 방법입니다. 이 방법의 경우 Read에서 SET NX를 쓰고, Write시에 Lock으로 순서를 엄밀히 보장하면 적어도 "Read Your Writes"는 보장합니다.
 
 Write에만 Lock을 잡는 것은 Monotonic Read를 만족할 수는 없지만, 중요한 속성은 아닐 수 있습니다.
 
-## 대안 2 - logical clocks
+### Or just use Compare and Set Mechanism
 
 CAS처럼 redis에서 version을 확인해서 이전 버전에 대한 SET (NX)를 무시하는 것입니다. 이것도 Monotonic Read는 만족하지 못하지만, "Read Your Writes"를 만족하게 됩니다.
+
+## Monitonic Read를 만족시키는 방법
+
+Flickering은 되게 좋지 않은 현상입니다. 사용자입장에서는 최신값이 나왔다가, 다시 이전값이 나오고, 또 다시 최신값이 나오는 현상을 만나게 됩니다.
+계좌 잔액이라고하면 돈이 들어왔다 나가는것처럼 보일 수 있죠.
+
+## Strong Consistency를 만족시키는 방법
+
+
 
 ## 마무리
 
